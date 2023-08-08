@@ -84,11 +84,14 @@ static void fill_attr(struct fuse_attr_out *arg,
 				const struct stat *attr, double attr_timeout)
 {
     memset(arg, 0, sizeof(*arg)); // XXX do not remove
+	//更新过期事件
     arg->attr_valid = calc_timeout_sec(attr_timeout);
     arg->attr_valid_nsec = calc_timeout_nsec(attr_timeout);
+	// 将属性更新到out中区
     convert_stat(attr, &arg->attr);
 }
 
+//根据 nodeid 从 ebpf map 中获取对应的 attr
 int attr_fetch(ebpf_context_t *ctxt, uint64_t nodeid,
 			struct fuse_attr_out *out)
 {
@@ -110,6 +113,7 @@ int attr_fetch(ebpf_context_t *ctxt, uint64_t nodeid,
 	return 0;
 }
 
+// 插入一个新属性
 int attr_insert(ebpf_context_t *ctxt, uint64_t nodeid,
 				const struct stat *attr, double attr_timeout)
 {
@@ -118,7 +122,7 @@ int attr_insert(ebpf_context_t *ctxt, uint64_t nodeid,
 
 	val.stale = 0;
 
-	// attr value
+	// attr value   更新到 out 
 	fill_attr(&val.out, attr, attr_timeout);
 
 	INFO("[%d] \t Inserting attr for node 0x%lx\n",
@@ -126,7 +130,7 @@ int attr_insert(ebpf_context_t *ctxt, uint64_t nodeid,
 
 	// update lookup table
 	int overwrite = 1; //XXX overwiting to update any negative entires
-
+	// 更新 ebpf map，没有就会创建
 	ret = ebpf_data_update(ctxt, (void *)&nodeid, (void *)&val, 1, overwrite);
 	if (ret)
 		ERROR("[%d] \t Failed to insert attr for node 0x%lx count %ju: %s\n",

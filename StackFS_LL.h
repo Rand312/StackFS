@@ -29,7 +29,7 @@ struct lo_inode {
     dev_t dev;
 
     /* inode number sent to lower F/S */
-    ino_t lo_ino;
+    ino_t lo_ino;  //自己的地址，root inode 为 1
 #ifdef ENABLE_EXTFUSE
 	/* parent inode */
 	ino_t pino;
@@ -101,6 +101,7 @@ static inline struct lo_data *get_lo_data(fuse_req_t req)
 	return (struct lo_data *) fuse_req_userdata(req);
 }
 
+// 根据nodeid获取lo_inode数据结构，除了根节点的 ino = 1 之外，其他打的 ino 全都是对应 lo_inode 数据结构地址转换而来
 static inline struct lo_inode *lookup_node_by_id_locked(fuse_req_t req, fuse_ino_t ino)
 {
     if (ino == FUSE_ROOT_ID)
@@ -109,8 +110,10 @@ static inline struct lo_inode *lookup_node_by_id_locked(fuse_req_t req, fuse_ino
         return (struct lo_inode *) (uintptr_t) ino;
 }
 
+//获取该 inode，统计技术
 static inline void acquire_node_locked(struct lo_inode* inode)
 {
+    //引用数 ++
     if (inode) {
         inode->nlookup++;
         //StackFS_trace("ACQUIRE %p (%s) rc=%ld\n", inode, inode->name, inode->refcount);

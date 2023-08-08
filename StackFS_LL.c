@@ -70,11 +70,15 @@ void print_usage(void)
 {
 	INFO("USAGE	: ./StackFS_ll -r <root>|-rootdir=<root> ");
 	INFO("<mntpnt> [FUSE options]\n");
-	INFO("<root>  : Root Directory containg the Low Level F/S\n");
+	//必须要指定一个ROOT_DIR
+	//而且必须是底层文件系统的一个路径
+	//如果这个路径仍然是一个fuse文件系统路径呢？？？？？
+	INFO("<root>  : Root Directory containg the Low Level F/S\n");   
 	INFO("<mntpnt> : Mount point ");
 	INFO("Example    : ./StackFS_ll -r root/ mntpnt/\n");
 }
 
+// 打印当前的时间，时间单位是微秒
 int64_t print_timer(void)
 {
 	struct timespec tms;
@@ -124,6 +128,7 @@ static void release_node_locked(fuse_req_t req, struct lo_inode* inode)
     }
 }
 
+// 将 inode 假如 parent 的 child 链表当中，头插法
 static void add_node_to_parent_locked(struct lo_inode *inode, struct lo_inode *parent) {
     if (inode && parent) {
         inode->parent = parent;
@@ -134,12 +139,15 @@ static void add_node_to_parent_locked(struct lo_inode *inode, struct lo_inode *p
         ERROR("add_node_to_parent_locked: NULL inode or parent\n");
 }
 
+//删除 inode
 static void remove_node_from_parent_locked(fuse_req_t req, struct lo_inode* inode)
-{
+{	
     if (inode->parent) {
+		//如果要删除的 inode 是头结点
         if (inode->parent->child == inode) {
             inode->parent->child = inode->parent->child->next;
         } else {
+			//经典链表操作
             struct lo_inode *inode2;
             inode2 = inode->parent->child;
             while (inode2 && inode2->next && inode2->next != inode) {
@@ -158,7 +166,9 @@ static void remove_node_from_parent_locked(fuse_req_t req, struct lo_inode* inod
  * Populates 'buf' with the path and returns the length of the path on success,
  * or returns -1 if the path is too long for the provided buffer.
  */
+//递归，获取 inode 对应的底层文件系统路径
 static ssize_t get_node_path_locked(struct lo_inode* inode, char* buf, size_t bufsize) {
+	//获取当前节点的名字
     const char *name = inode->name;
     size_t namelen = inode->namelen;
 
@@ -169,6 +179,7 @@ static ssize_t get_node_path_locked(struct lo_inode* inode, char* buf, size_t bu
     }
 
     ssize_t pathlen = 0;
+	//如果当前 inode 有父节点，递归的先处理父节点
     if (inode->parent) {
         pathlen = get_node_path_locked(inode->parent, buf, bufsize - namelen - 1);
         if (pathlen < 0) {
@@ -177,14 +188,18 @@ static ssize_t get_node_path_locked(struct lo_inode* inode, char* buf, size_t bu
         }
         buf[pathlen++] = '/';
     }
-
+	//到这里，已经将父节点的底层文件系统绝对路径找到了，放在了 buf 中
+	//将自己的名字copy到buf
     memcpy(buf + pathlen, name, namelen + 1); /* include trailing \0 */
 
     //INFO("Getting path for node %s(%d): %s(%d)\n",
     //              name, namelen, buf, pathlen + namelen);
+	//返回当前 inode 对应的底层文件系统绝对路径
     return pathlen + namelen;
 }
 
+// 获取 ino 对应的 lo_inode 数据结构
+// 获取 ino 对应的底层文件系统路径，放在 buf 中
 static struct lo_inode* lookup_node_and_path_by_id_locked(fuse_req_t req,
                                     fuse_ino_t ino, char* buf, size_t bufsize)
 {
@@ -195,6 +210,7 @@ static struct lo_inode* lookup_node_and_path_by_id_locked(fuse_req_t req,
     return inode;
 }
 
+// 根据 name 获取 child lo_inode
 static struct lo_inode *lookup_child_by_name_locked(struct lo_inode *inode, const char *name)
 {
     for (inode = inode->child; inode; inode = inode->next) {
@@ -208,43 +224,53 @@ static struct lo_inode *lookup_child_by_name_locked(struct lo_inode *inode, cons
     }
     return 0;
 }
-
+// 在 parent lo_inode 下面创建一个 lo_inode
 struct lo_inode *create_node_locked(struct lo_inode *parent, const char *name)
 {
     struct lo_inode *node;
     size_t namelen = strlen(name);
 
+	// 先分配一个 lo_inode
     node = calloc(1, sizeof(struct lo_inode));
     if (!node) {
         return NULL;
     }
+	// 分配名字空间
     node->name = malloc(namelen + 1);
     if (!node->name) {
         free(node);
         return NULL;
     }
+	// 赋值名字
     memcpy(node->name, name, namelen + 1);
     node->namelen = namelen;
     //node->ino = fuse->global->inode_ctr++;
     //node->gen = fuse->global->next_generation++;
 
     /* store this for mapping (debugging) */
+	// 记录该 lo_inode 对应的 ino 编号，也就是自己的地址
     node->lo_ino = (uintptr_t) node;
+	// 刚创建，删除标志为 0
     node->deleted = 0;
 #ifdef ENABLE_EXTFUSE
+	// 记录 parent lo_inode 
 	node->pino = parent->ino == FUSE_ROOT_ID ? FUSE_ROOT_ID : (uintptr_t) parent;
 #endif
+	//增加 node->nlookup 引用计数
     acquire_node_locked(node);
+	//将node假如parent的孩子链表中，头插法
     add_node_to_parent_locked(node, parent);
     return node;
 }
 
+//改名操作
 static int rename_node_locked(struct lo_inode *node, const char *name)
 {
     size_t namelen = strlen(name);
 
     /* make the storage bigger without actually changing the name
      * in case an error occurs part way */
+	//如果新名字比旧名字长，重新分配空间
     if (namelen > node->namelen) {
         char* new_name = realloc(node->name, namelen + 1);
         if (!new_name) {
@@ -252,7 +278,7 @@ static int rename_node_locked(struct lo_inode *node, const char *name)
         }
         node->name = new_name;
     }
-
+	// 拷贝名字
     memcpy(node->name, name, namelen + 1);
     node->namelen = namelen;
     return 0;
@@ -272,6 +298,7 @@ static struct lo_inode* acquire_or_create_child_locked(
 }
 #endif
 
+// 已经知道父路径，构造孩子路径，字符串拼接操作
 static char *construct_child_path(const char *ppath, const char *cname,
 		char *buf, size_t bufsize)
 {
@@ -299,12 +326,14 @@ static char *construct_child_path(const char *ppath, const char *cname,
  * Populates 'buf' with the path and returns the actual name (within 'buf') on success,
  * or returns NULL if the path is too long for the provided buffer.
  */
+//有何意义这个函数？？？？？？？？？
 static char* find_file_within(const char* path, const char* name,
         char* buf, size_t bufsize, int search)
 {
     //size_t pathlen = strlen(path);
     //size_t namelen = strlen(name);
     //size_t childlen = pathlen + namelen + 1;
+	//构建要查找文件的路径，放入buf
     char* actual = construct_child_path(path, name, buf, bufsize);
 	if (!actual)
 		return NULL;
@@ -316,16 +345,19 @@ static char* find_file_within(const char* path, const char* name,
     //buf[pathlen] = '/';
     //actual = buf + pathlen + 1;
     //memcpy(actual, name, namelen + 1);
-
+	//检查该路径的文件是否存在，如果存在
     if (search && access(buf, F_OK)) {
         struct dirent* entry;
+		//打开父目录
         DIR* dir = opendir(path);
         if (!dir) {
             ERROR("[%s:%d] opendir %s failed: %s\n",
                     __func__, __LINE__, path, strerror(errno));
             return actual;
         }
+		//一个个读取目录项
         while ((entry = readdir(dir))) {
+			//找到了目标目录项
             if (!strcmp(entry->d_name, name)) {
                 /* we have a match - replace the name, don't need to copy the null again */
                 memcpy(actual, entry->d_name, strlen(name));
@@ -367,6 +399,7 @@ static void create_negative_entry(fuse_req_t req, fuse_ino_t pino,
  * @time parameter signifies that this request is generate explicitly,
  * and is not a case of performance optimization (e.g., readdir ahead)
  */
+//创建一个 entry，其实就是一个 dentry
 int create_entry(fuse_req_t req, struct lo_inode* pinode,
                   const char *name, const char *cpath,
                   struct fuse_entry_param *e, const char *op, int time)
@@ -377,9 +410,11 @@ int create_entry(fuse_req_t req, struct lo_inode* pinode,
 	int64_t res;
 
 	/* Assign the stats of the newly created directory */
+	//初始话 fuse_entry_param
 	memset(e, 0, sizeof(*e));
 
 	/* Assign the stats of the newly created directory */
+	//获取该路径上的文件属性
 	res = lstat(cpath, &e->attr);
 	if (time) {
 		generate_end_time(req);
@@ -397,10 +432,13 @@ int create_entry(fuse_req_t req, struct lo_inode* pinode,
 		return -1;
 	} else {
 		pthread_mutex_lock(&lo_data->mutex);
+		//获取 child 的 lo_inode
 		inode = lookup_child_by_name_locked(pinode, name);
+		//如果存在，acquire 增加引用计数
     	if (inode)
 			acquire_node_locked(inode);
     	else
+		//不在，创建一个 lo_inode
 			inode = create_node_locked(pinode, name);
 		if (!inode) {
 			ERROR("[%d] \t %s(%s) node creation failed: %s\n",
@@ -417,7 +455,7 @@ int create_entry(fuse_req_t req, struct lo_inode* pinode,
 		/* optimization entries have nlookup=0 */
 		if (!time)
 			inode->nlookup = 0;
-
+		// 底层文件的 inode 编号
 		inode->ino = e->attr.st_ino;
 		inode->dev = e->attr.st_dev;
 
@@ -435,8 +473,10 @@ int create_entry(fuse_req_t req, struct lo_inode* pinode,
 				gettid(), res < 0 ? "stale" : "", res, inode->nlookup);
 			if (res < 0)
 				res = -res;
+				//目录项++
 			inode->nlookup = res + 1;
 		}
+		//插入新目录项到 ebpf map
 		res = lookup_insert(get_lo_data(req)->ebpf_ctxt, inode->pino,
 				inode->name, inode->nlookup, e);
 		if (res)
@@ -586,6 +626,7 @@ static void stackfs_ll_readlink(fuse_req_t req, fuse_ino_t ino)
 	fuse_reply_buf(req, linkname, res);
 }
 
+//在 pino 对应的目录下创建 name 目录项
 static void stackfs_ll_lookup(fuse_req_t req, fuse_ino_t pino,
 						const char *name)
 {
@@ -601,12 +642,14 @@ static void stackfs_ll_lookup(fuse_req_t req, fuse_ino_t pino,
 	INCR_COUNTER(lookup);
 
 	pthread_mutex_lock(&lo_data->mutex);
+	// 获取父节点的 ppath，获取父节点的 lo_inode：pinode
     pinode = lookup_node_and_path_by_id_locked(req, pino, ppath, PATH_MAX);
 	pthread_mutex_unlock(&lo_data->mutex);
 
     INFO("[%d] LOOKUP(%s) @ 0x%"PRIx64" (%s)\n",
 				gettid(), name, (uint64_t)pino, pinode ? pinode->name : "?");
-
+	// 这里的判断具体为何意？？？？why？？？
+	// 这里是构建了 child path
 	if (!pinode || !find_file_within(ppath, name, cpath, PATH_MAX, 1)) {
 		create_negative_entry(req, pino, name, cpath, &e);
 		return;
@@ -651,6 +694,7 @@ static void stackfs_ll_getattr(fuse_req_t req, fuse_ino_t ino,
 					gettid(), (uint64_t)ino, path);
 
 	generate_start_time(req);
+	// 获取对应底层文件的 attr
 	res = lstat(path, &stbuf);
 	generate_end_time(req);
 	populate_time(req);
@@ -665,6 +709,7 @@ static void stackfs_ll_getattr(fuse_req_t req, fuse_ino_t ino,
 
 #ifdef ENABLE_EXTFUSE_ATTR
 	pthread_mutex_lock(&lo_data->mutex);
+	// 插入“新”属性
 	attr_insert(lo_data->ebpf_ctxt, (uintptr_t)inode->lo_ino,
 			&stbuf, attr_timeout);
 	pthread_mutex_unlock(&lo_data->mutex);
@@ -822,9 +867,11 @@ static void stackfs_ll_create(fuse_req_t req, fuse_ino_t pino,
 	INCR_COUNTER(create);
 
 	pthread_mutex_lock(&lo_data->mutex);
+	//父节点的路径和lo_inode
     pinode = lookup_node_and_path_by_id_locked(req, pino, ppath, PATH_MAX);
 	pthread_mutex_unlock(&lo_data->mutex);
 
+	// 孩子节点的底层路径
 	if (!pinode || !find_file_within(ppath, name, cpath, PATH_MAX, 1)) {
 		ERROR("[%d] CREATE (%s, 0%o) failed: %s\n",
 				gettid(), name, mode, strerror(ENOENT));
@@ -836,6 +883,7 @@ static void stackfs_ll_create(fuse_req_t req, fuse_ino_t pino,
 				gettid(), name, mode, (uint64_t)pino, ppath);
 
 	generate_start_time(req);
+	// 打开、创建该 child 文件
 	fd = open(cpath, fi->flags, mode);
 	if (fd == -1) {
 		generate_end_time(req);
@@ -846,7 +894,7 @@ static void stackfs_ll_create(fuse_req_t req, fuse_ino_t pino,
 		fuse_reply_err(req, errno);
 		return;
 	}
-
+	//创建 entry，填充 entry_param 结构体，分配创建了 lo_inode
 	res = create_entry(req, pinode, name, cpath, &e, "create", 1);
 	if (res) {
 		close(fd);
@@ -1003,6 +1051,7 @@ static void stackfs_ll_open(fuse_req_t req, fuse_ino_t ino,
 	fuse_reply_open(req, fi);
 }
 
+//打开目录操作
 static void stackfs_ll_opendir(fuse_req_t req, fuse_ino_t ino,
 					struct fuse_file_info *fi)
 {
@@ -1016,6 +1065,7 @@ static void stackfs_ll_opendir(fuse_req_t req, fuse_ino_t ino,
 	INCR_COUNTER(opendir);
 
 	pthread_mutex_lock(&lo_data->mutex);
+	//获取该目录的底层路径，lo_inode
     inode = lookup_node_and_path_by_id_locked(req, ino, path, PATH_MAX);
 	pthread_mutex_unlock(&lo_data->mutex);
 
@@ -1030,6 +1080,7 @@ static void stackfs_ll_opendir(fuse_req_t req, fuse_ino_t ino,
 		gettid(), (uint64_t)ino, path);
 
 	generate_start_time(req);
+	// 打开该目录
 	dp = opendir(path);
 	generate_end_time(req);
 	populate_time(req);
@@ -1041,7 +1092,9 @@ static void stackfs_ll_opendir(fuse_req_t req, fuse_ino_t ino,
 		return;
 	}
 
+	// 分配一个 lo_dirptr 结构
 	d = malloc(sizeof(struct lo_dirptr));
+	// 记录实际的 DIR 指针
 	d->dp = dp;
 	d->offset = 0;
 	d->entry = NULL;
@@ -1049,6 +1102,7 @@ static void stackfs_ll_opendir(fuse_req_t req, fuse_ino_t ino,
 	INFO("[%d] \t OPENDIR @ 0x%"PRIx64" d %p dp %p path: %s fd: 0x%x\n",
 			gettid(), (uint64_t)ino, d, dp, path, dirfd(dp));
 
+	// 对于目录，打开后 fi->fh 记录的是 lo_dirptr
 	fi->fh = (uintptr_t) d;
 	//fi->lower_fd = dirfd(dp);
 	fuse_reply_open(req, fi);
@@ -1059,6 +1113,7 @@ static void cache_attr(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info *fi
 {
 	struct stat stbuf;
 	memset(&stbuf, 0, sizeof(stbuf));
+	//获取底层文件的attr
 	int res = fstat(fi->fh, &stbuf);
 	if (res) {
 		ERROR("[%d] \t fstat: read(0x%"PRIx64") failed: %s\n",
@@ -1068,7 +1123,9 @@ static void cache_attr(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info *fi
 		double attr_timeout = lo_attr_valid_time(req);
 		struct lo_inode* inode;
 		pthread_mutex_lock(&lo_data->mutex);
+		//获取lo_inode
 		inode = lookup_node_by_id_locked(req, ino);
+		//插入attr到ebpf map
 		attr_insert(lo_data->ebpf_ctxt, (uintptr_t)inode->lo_ino,
 				&stbuf, attr_timeout);
 		pthread_mutex_unlock(&lo_data->mutex);
@@ -1096,7 +1153,7 @@ static void stackfs_ll_read(fuse_req_t req, fuse_ino_t ino, size_t size,
 #endif
 
 	INCR_COUNTER(read);
-
+	// 如果使用零拷贝，直接记录 fd 即可，直接返回，后续是怎么做的？？？
 	if (USE_SPLICE) {
 		struct fuse_bufvec buf = FUSE_BUFVEC_INIT(size);
 
@@ -1113,8 +1170,10 @@ static void stackfs_ll_read(fuse_req_t req, fuse_ino_t ino, size_t size,
 		cache_attr(req, ino, fi);
 #endif
 		fuse_reply_data(req, &buf, FUSE_BUF_SPLICE_MOVE);
+	// 否则，普通的 read 系统调用
 	} else {
 		int res;
+		// 先分配一个 buffer
 		char *buf = (char *)malloc(size);
 		if (!buf) {
 			ERROR("[%d] \t Read @ 0x%"PRIx64" fd: 0x%"PRIx64" "
@@ -1128,6 +1187,7 @@ static void stackfs_ll_read(fuse_req_t req, fuse_ino_t ino, size_t size,
 					gettid(), (uint64_t)ino, fi->fh, offset, size);
 
 		generate_start_time(req);
+		// pread 系统调用
 		res = pread(fi->fh, buf, size, offset);
 		generate_end_time(req);
 		populate_time(req);
@@ -1139,6 +1199,7 @@ static void stackfs_ll_read(fuse_req_t req, fuse_ino_t ino, size_t size,
 					gettid(), (uint64_t)ino, fi->fh, offset, size, strerror(errno));
 			fuse_reply_err(req, errno);
 		} else
+			//回复
 			res = fuse_reply_buf(req, buf, res);
 		free(buf);
 	}
@@ -2374,6 +2435,7 @@ int main(int argc, char **argv)
 	s_info.entry_valid = BIG_TIMEOUT;
 #endif
 
+	//这里应该会获取到 ROOT_DIR
 	res = fuse_opt_parse(&args, &s_info, stackfs_opts, stackfs_process_arg);
 
 	if (res) {
@@ -2404,16 +2466,19 @@ int main(int argc, char **argv)
 		}
 	}
 
+	// 获取根目录路径
 	root = s_info.root;
 	struct lo_data *lo = NULL;
-
+	// 如果根目录选项存在
 	if (root) {
+		
 		lo = (struct lo_data *) calloc(1, sizeof(struct lo_data));
 		if (!lo) {
 			ERROR( "fuse: memory allocation failed\n");
 			res = -1;
 			goto out2; /* free the resolved_statsDir */
 		}
+		// 获取根目录的绝对路径
 		resolved_rootdir_path = realpath(root, NULL);
 		if (!resolved_rootdir_path) {
 			INFO("There is a problem in resolving the root ");
@@ -2424,6 +2489,7 @@ int main(int argc, char **argv)
 		}
 		if (res == 0) {
 #ifdef ENABLE_EXTFUSE
+
 			rootfd = open(root, O_PATH);
 			if (rootfd == -1) {
 				ERROR( "Failed to open rootdir %s: %s\n",
@@ -2433,16 +2499,20 @@ int main(int argc, char **argv)
 				INFO("root %s\n", root);
 			}
 #endif
+			// 记录根目录的名字
 			(lo->root).name = resolved_rootdir_path;
 			(lo->root).namelen = strlen(resolved_rootdir_path);
+			// 根目录的 inode 编号为 1，区别于其他的本地 inode 编号，其他的就是 lo_inode 这个数据结构地址转长整型
 			(lo->root).ino = FUSE_ROOT_ID;
+			// 这是记录硬链接数？？？
 			(lo->root).nlookup = 2;
+			// 记录有效时间，怎么计算的？？？
 			lo->attr_valid = s_info.attr_valid;
 			lo->entry_valid = s_info.entry_valid;
 			/* Initialise the spin lock for table */
 			pthread_mutex_init(&(lo->mutex), 0);
 		}
-	} else {
+	} else {  //根目录选项必须存在，否则出错
 		res = -1;
 		goto out2;
 	}
@@ -2453,6 +2523,7 @@ int main(int argc, char **argv)
 	/* allow other users/apps to access the storage space */
     fuse_opt_add_arg(&args, "-oallow_other");
 
+	// 解析挂载点路径，解析是否要多线程处理
 	res = fuse_parse_cmdline(&args, &mountpoint, &multithreaded, NULL);
 
 	/* Initialise the spinlock before the logfile creation */
@@ -2461,11 +2532,13 @@ int main(int argc, char **argv)
 	ERROR("Multi Threaded : %d\n", multithreaded);
 
 	if (res != -1) {
+		// 挂载fuse文件系统，并且获取驱动通信 fd，记录在 ch->fd
 		ch = fuse_mount(mountpoint, &args);
 		if (ch) {
 			struct fuse_session *se;
 
 			INFO("Mounted Successfully\n");
+			//建立一个新的 session
 			se = fuse_lowlevel_new(&args, &hello_ll_oper,
 						sizeof(hello_ll_oper), lo);
 			if (se) {
@@ -2479,6 +2552,7 @@ int main(int argc, char **argv)
 						set_signhandlers();
 					}
 #endif
+					//将 channel 加入 session
 					fuse_session_add_chan(se, ch);
 					if (resolved_statsDir)
 						fuse_session_add_statsDir(se,
@@ -2487,6 +2561,7 @@ int main(int argc, char **argv)
 					if (multithreaded)
 						err = fuse_session_loop_mt(se);
 					else
+					//开始循接收、处理请求
 						err = fuse_session_loop(se);
 					(void) err;
 

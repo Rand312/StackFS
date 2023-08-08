@@ -84,13 +84,13 @@ int64_t lookup_fetch(ebpf_context_t *ctxt, uint64_t parent_ino,
 	lookup_entry_key_t key = {0, {0}};
 	lookup_entry_val_t val = {0, 0, 0, 0, 0};
 
-	// key
+	// key 为 nodeid 和 name
 	key.nodeid = parent_ino;
 	strncpy(key.name, name, NAME_MAX);
 
 	INFO("[%d] \t Looking up node name %s (%ju) parent 0x%lx\n",
 		gettid(), name, strlen(name), parent_ino);
-
+	//从ebpf map中获取 entry value
 	ret = ebpf_data_lookup(ctxt, (void *)&key, (void *)&val, 0);
 	if (ret) {
 		if (errno != ENOENT)
@@ -98,13 +98,14 @@ int64_t lookup_fetch(ebpf_context_t *ctxt, uint64_t parent_ino,
 				gettid(), name, strlen(name), parent_ino, strerror(errno));
 		return ret;
 	}
-
+	// 如果已经 stale，引用计数取反
 	if (val.stale) {
 		INFO("[%d] \t Stale entry nlookup: %ld\n", gettid(), val.nlookup);
 		val.nlookup *= -1;
 	}
 
 	errno = 0;
+	//返回引用计数，也即是目录项个数？
 	return val.nlookup;
 }
 
@@ -141,6 +142,7 @@ int lookup_insert(ebpf_context_t *ctxt, uint64_t parent_ino,
 	return ret;
 }
 
+//处理过期entry，一个个的遍历，过期就删除
 void lookup_gc_stale(ebpf_context_t *ctxt)
 {
 	lookup_entry_key_t key = {0, {0}};
